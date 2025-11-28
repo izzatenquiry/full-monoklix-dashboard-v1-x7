@@ -213,16 +213,34 @@ const ImageGenerationView: React.FC<ImageGenerationViewProps> = ({ onCreateVideo
 
   // Updated with Auto-Retry Logic (3 attempts max)
   const generateOneImage = async (index: number, attempt = 1, excludedServers: string[] = []) => {
-      // 1. Select a server
-      // Filter out servers we've already failed on for this specific slot
-      const availableServers = SERVERS.filter(s => !excludedServers.includes(s.url));
-      // If all servers excluded (unlikely), fallback to full list. Otherwise pick random from available.
-      const serverToUse = availableServers.length > 0 
-          ? availableServers[Math.floor(Math.random() * availableServers.length)]
-          : SERVERS[Math.floor(Math.random() * SERVERS.length)];
+      // Logic for Server Selection respecting Personal Token Only mode
+      const selectedServer = sessionStorage.getItem('selectedProxyServer');
+      const tokenMode = sessionStorage.getItem('monoklix_token_mode');
+      const isPersonalOnly = tokenMode === 'personal_only';
+
+      let serverToUseUrl = '';
+
+      if (isPersonalOnly) {
+          // In Personal Token Only mode, we strictly use the selected server (or default if not set).
+          // We DO NOT switch servers on retry.
+          serverToUseUrl = selectedServer || 'https://veox.monoklix.com';
+      } else {
+          // Hybrid Mode
+          if (attempt === 1 && selectedServer && !excludedServers.includes(selectedServer)) {
+              // Attempt 1: Prefer user's selected server
+              serverToUseUrl = selectedServer;
+          } else {
+              // Retry / Auto-balance: Pick a random available server from pool
+              const availableServers = SERVERS.filter(s => !excludedServers.includes(s.url));
+              const serverObj = availableServers.length > 0 
+                  ? availableServers[Math.floor(Math.random() * availableServers.length)]
+                  : SERVERS[Math.floor(Math.random() * SERVERS.length)];
+              serverToUseUrl = serverObj.url;
+          }
+      }
 
       try {
-          const resultImage = await performGeneration(serverToUse.url);
+          const resultImage = await performGeneration(serverToUseUrl);
           
           await addHistoryItem({
               type: 'Image',
@@ -244,14 +262,15 @@ const ImageGenerationView: React.FC<ImageGenerationViewProps> = ({ onCreateVideo
           setProgress(prev => prev + 1);
 
       } catch (e) {
-          console.error(`Image Generation Failed (Slot ${index + 1}, Attempt ${attempt} on ${serverToUse.url})`);
+          console.error(`Image Generation Failed (Slot ${index + 1}, Attempt ${attempt} on ${serverToUseUrl})`);
           
-          if (attempt < 3) {
-              // AUTO-RETRY: Recursively call self with incremented attempt and exclude bad server
+          // Retry Logic
+          if (!isPersonalOnly && attempt < 3) {
+              // Hybrid Mode: Auto-switch server and retry
               console.log(`Auto-switching server for Slot ${index + 1}...`);
-              await generateOneImage(index, attempt + 1, [...excludedServers, serverToUse.url]);
+              await generateOneImage(index, attempt + 1, [...excludedServers, serverToUseUrl]);
           } else {
-              // FINAL FAILURE: All attempts failed.
+              // Personal Only Mode OR Max attempts reached: Fail
               const userFriendlyMessage = handleApiError(e);
               setImages(prev => {
                   const newImages = [...prev];
